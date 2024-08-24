@@ -1,10 +1,3 @@
-# Author: Shyamal Suhana Chandra
-# Date: August 16, 2024
-# Project: Magical Toys, Level 1-4
-# Due Date: August 18, 2024
-
-# Boilerplate code for PyAudio taken from: https://realpython.com/playing-and-recording-sound-python/#pyaudio
-
 import torch
 import whisper
 import pyaudio
@@ -17,13 +10,21 @@ import re
 import asyncio
 import ollama
 import pygame
+import tkinter as tk
+from tkinter import ttk
+from threading import Thread
+from queue import Queue, Empty
+import time
 
 from TTS.api import TTS
 
 result_outer = ""
 speak_outer = ""
+recording = False
+audio_queue = Queue(maxsize=1)  # Queue to hold the most recent audio file
 
 def record():
+    global recording
     FORMAT = pyaudio.paInt16
     CHANNELS = 1
     RATE = 44100
@@ -41,16 +42,12 @@ def record():
     print("recording started")
     Recordframes = []
 
-    recording = True
+    # Clear the buffer by reading and discarding any existing data
+    stream.read(stream.get_read_available())
+
     while recording:
-        for event in pygame.event.get():
-            if event.type == pygame.KEYUP:
-                if event.key == pygame.K_r:  # Stop recording on key release
-                    recording = False
-                    break
-        if recording:
-            data = stream.read(CHUNK)
-            Recordframes.append(data)
+        data = stream.read(CHUNK)
+        Recordframes.append(data)
 
     print("recording stopped")
 
@@ -64,97 +61,129 @@ def record():
     waveFile.setframerate(RATE)
     waveFile.writeframes(b''.join(Recordframes))
     waveFile.close()
-    return asyncio.sleep(0)
 
-def speak(voice):
+    # Put the filename in the queue, replacing any existing item
+    if not audio_queue.empty():
+        try:
+            audio_queue.get_nowait()
+        except Empty:
+            pass
+    audio_queue.put(WAVE_OUTPUT_FILENAME)
 
+async def speak(voice):
     global speak_outer
-
     message = str(speak_outer)
-
+    root.after(0, update_speak_label)  # Update the label before speaking
     os.system("say -v \"" + str(voice) + "\" -r 150 \""+ str(message) +"\"")
-    return asyncio.sleep(0)
 
-def convert_from_wav_to_mp3():
+async def convert_from_wav_to_mp3(filename):
+    os.system(f"ffmpeg -y -v quiet -i {filename} -ar 16000 -ac 1 -c:a pcm_s16le cleanFile.wav")
 
-    os.system("ffmpeg -y -v quiet -i recordedFile.wav -ar 16000 -ac 1 -c:a pcm_s16le cleanFile.wav")
-    return asyncio.sleep(0)
-
-def speech_syn():
-
-    global speak_outer
-
-    os.environ["COQUI_TOS_AGREED"] = "1"
-
-    device = "cpu"
-    tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
-    tts.tts_to_file(text=str(speak_outer), speaker_wav="shyamal.wav", language="en", file_path="output.wav")
-
-def speech_recog(filename):
-
-        global result_outer
-
-        # load audio and pad/trim it to fit 30 seconds
+async def speech_recog(filename):
+    global result_outer
+    try:
         model = whisper.load_model("tiny")
         audio = whisper.load_audio(filename)
         audio = whisper.pad_or_trim(audio)
-
-        # make log-Mel spectrogram and move to the same device as the model
         mel = whisper.log_mel_spectrogram(audio).to(model.device)
-
-        # detect the spoken language
         _, probs = model.detect_language(mel)
-        #print(f"Detected language: {max(probs, key=probs.get)}")
-
-        # decode the audio
-        options = whisper.DecodingOptions(fp16 = False)
+        options = whisper.DecodingOptions(fp16=False)
         result = whisper.decode(model, mel, options)
-
         result_no_dots = re.sub(r'\.', '', result.text)
         result_no_dots = result_no_dots.lower()
-
-        # print the recognized text
         print(result_no_dots)
         result_outer = result_no_dots
-        return asyncio.sleep(0)
+        root.after(0, update_result_label)
+    except Exception as e:
+        print(f"Error during speech recognition: {e}")
+        result_outer = "Error during speech recognition"
+        root.after(0, update_result_label)
 
 def llm_insert():
     global result_outer
     global speak_outer
+    try:
+        q = result_outer
+        #response = ollama.chat(model='openhermes2.5-mistral', messages=[{'role': 'user','content': q,},])
+        response = ollama.chat(model='tinyllama', messages=[{'role': 'user','content': q,},])
+        r1 = response['message']['content']
+        speak_outer = r1
+        print("Prompt reply: " + r1 + "")
+    except Exception as e:
+        print(f"Error during LLM insertion: {e}")
+        speak_outer = "Error during LLM insertion"
 
-    # Boilerplate code taken from: https://apmonitor.com/dde/index.php/Main/LargeLanguageModel
-    q = result_outer
-    response = ollama.chat(model='openhermes2.5-mistral', messages=[{'role': 'user','content': q,},])
-    r1 = response['message']['content']
-    speak_outer = r1
-    print("Prompt reply: " + r1 + "")
+async def process_audio(filename):
+    await convert_from_wav_to_mp3(filename)
+    await speech_recog('cleanFile.wav')
+    llm_insert()
+    await speak("Zoe (Premium)")
 
-async def main():
-    global result_outer
-    global speak_outer
-
-    pygame.init()
-    screen = pygame.display.set_mode((640, 480))
-    pygame.display.set_caption("Press 'R' to start/stop recording")
-        
+def audio_processor():
     while True:
-        for event in pygame.event.get():
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_r:  # Start recording on key press
-                    print("Recording voice!")
-                    await record()
-                    print("Converting wav to mp3!")
-                    await convert_from_wav_to_mp3()
-                    print("Speech recognition with Whisper!")
-                    await speech_recog('cleanFile.wav')
-                    print("Chatting with the LLM!")
-                    llm_insert()
-                    print("Speak the response based on the chat interface with LLM!")
-                    await speak("Zoe (Premium)")
-                    print("Speak with Tortoise TTS")
-                    # speech_syn()
-                    # os.system(f"mplayer output.wav")
-                    print("Demo Done")
+        try:
+            filename = audio_queue.get(timeout=1)
+            asyncio.run(process_audio(filename))
+        except Empty:
+            time.sleep(0.1)
+        except Exception as e:
+            print(f"Error in audio processor: {e}")
 
-if __name__ == "__main__":
-    asyncio.run(main())
+def update_result_label():
+    result_text.config(state=tk.NORMAL)
+    result_text.delete(1.0, tk.END)
+    result_text.insert(tk.END, f"Recognized: {result_outer}")
+    result_text.config(state=tk.DISABLED)
+
+def update_speak_label():
+    speak_text.config(state=tk.NORMAL)
+    speak_text.delete(1.0, tk.END)
+    speak_text.insert(tk.END, f"Synthesized: {speak_outer}")
+    speak_text.config(state=tk.DISABLED)
+
+def start_recording():
+    global recording, result_outer, speak_outer
+    if not recording:
+        result_outer = ""
+        speak_outer = ""
+        recording = True
+        print("recording started")
+        Thread(target=record).start()
+
+def stop_recording():
+    global recording
+    if recording:
+        recording = False
+        print("recording stopped")
+
+def on_button_press(event):
+    start_recording()
+
+def on_button_release(event):
+    stop_recording()
+
+root = tk.Tk()
+root.title("Voice Recorder")
+root.geometry("400x300")
+root.resizable(True, True)
+
+record_button = ttk.Button(root, text="Hold to Record")
+record_button.pack(pady=20)
+
+result_text = tk.Text(root, height=5, wrap=tk.WORD)
+result_text.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
+result_text.insert(tk.END, "Recognized: ")
+result_text.config(state=tk.DISABLED)
+
+speak_text = tk.Text(root, height=5, wrap=tk.WORD)
+speak_text.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
+speak_text.insert(tk.END, "Synthesized: ")
+speak_text.config(state=tk.DISABLED)
+
+record_button.bind('<ButtonPress-1>', on_button_press)
+record_button.bind('<ButtonRelease-1>', on_button_release)
+
+# Start the audio processor thread
+Thread(target=audio_processor, daemon=True).start()
+
+root.mainloop()
