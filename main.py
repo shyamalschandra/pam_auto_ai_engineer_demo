@@ -15,6 +15,7 @@ import time
 import numpy as np
 import warnings
 import subprocess
+from tkinter import Canvas
 
 warnings.filterwarnings("ignore", category=UserWarning, module="whisper.transcribe")
 
@@ -50,6 +51,7 @@ input_devices = []
 output_voices = []
 selected_input_device = tk.StringVar()
 selected_output_voice = tk.StringVar()
+listening_indicator = None
 
 # Add these functions to get input devices and output voices
 def get_input_devices():
@@ -153,6 +155,8 @@ def continuous_recognition():
             os.remove("temp_audio.wav")
 
         llm_insert()
+        
+    root.after(0, lambda: update_listening_indicator(False))
 
 async def speak(voice):
     global speak_outer, listening
@@ -161,6 +165,7 @@ async def speak(voice):
 
     with lock:
         listening = False
+    root.after(0, lambda: update_listening_indicator(False))
     
     # Set progress bar to 100% before speech synthesis
     root.after(0, lambda: progress_vars['speech_synthesis'].set(100))
@@ -184,6 +189,7 @@ async def speak(voice):
 
     with lock:
         listening = True
+    root.after(0, lambda: update_listening_indicator(True))
     root.after(0, resume_listening)
 
 def zero_out_ui():
@@ -243,6 +249,7 @@ def start_listening():
         
         update_result_label()
         update_speak_label()
+        update_listening_indicator(True)
         
         Thread(target=continuous_recognition).start()
 
@@ -256,19 +263,26 @@ def stop_listening():
     with lock:
         listening = False
         recording = False
+    update_listening_indicator(False)
 
 def on_start_button_click():
     start_listening()
     record_button.config(text="Stop Listening", command=on_stop_button_click)
+    update_listening_indicator(True)
 
 def on_stop_button_click():
     stop_listening()
     record_button.config(text="Start Listening", command=on_start_button_click)
+    update_listening_indicator(False)
 
 def update_task_time(task, elapsed_time):
     minutes, seconds = divmod(int(elapsed_time), 60)
     centiseconds = int((elapsed_time - int(elapsed_time)) * 100)
     task_times[task].set(f"{minutes:02d}:{seconds:02d}.{centiseconds:02d}")
+
+def update_listening_indicator(is_listening):
+    color = "green" if is_listening else "red"
+    listening_indicator.config(bg=color)
 
 # Add these functions to create the input and output selection widgets
 def create_input_selection():
@@ -291,13 +305,19 @@ def create_output_selection():
 
 # Modify your main UI creation to include the new widgets
 def create_ui():
-    global record_button, result_text, speak_text
+    global record_button, result_text, speak_text, listening_indicator
 
     create_input_selection()
     create_output_selection()
 
-    record_button = ttk.Button(root, text="Start Listening", command=on_start_button_click)
-    record_button.pack(pady=20)
+    button_frame = ttk.Frame(root)
+    button_frame.pack(pady=20)
+
+    record_button = ttk.Button(button_frame, text="Start Listening", command=on_start_button_click)
+    record_button.pack(side=tk.LEFT, padx=(0, 10))
+
+    listening_indicator = Canvas(button_frame, width=20, height=20, bg="red")
+    listening_indicator.pack(side=tk.LEFT)
 
     result_text = tk.Text(root, height=5, wrap=tk.WORD)
     result_text.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
