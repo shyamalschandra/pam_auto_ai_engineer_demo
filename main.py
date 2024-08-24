@@ -4,27 +4,30 @@ import pyaudio
 import wave
 import sys
 import os
-os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide"
-from pyffmpeg import FFmpeg
 import re
 import asyncio
 import ollama
-import pygame
 import tkinter as tk
 from tkinter import ttk
-from threading import Thread
+from threading import Thread, Lock
 from queue import Queue, Empty
 import time
+import numpy as np
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="whisper.transcribe")
 
 result_outer = ""
 speak_outer = ""
 recording = False
-audio_queue = Queue(maxsize=1)  # Queue to hold the most recent audio file
+listening = False
+audio_queue = Queue(maxsize=1)
+STOP_WORD = "roger"  # Change this to your preferred stop word
+lock = Lock()
 
 # Create the root window first
 root = tk.Tk()
-root.title("Voice Recorder")
-root.geometry("400x600")  # Increased height to accommodate timers
+root.title("Voice Assistant")
+root.geometry("400x600")
 root.resizable(True, True)
 
 # Now create the Tkinter variables
@@ -40,148 +43,129 @@ task_times = {
     'speech_synthesis': tk.StringVar(root, value="00:00.00")
 }
 
-def record():
+def record_audio():
     global recording
     FORMAT = pyaudio.paInt16
     CHANNELS = 1
-    RATE = 44100
-    CHUNK = 512
-    WAVE_OUTPUT_FILENAME = "recordedFile.wav"
-    device_index = 2
+    RATE = 16000
+    CHUNK = 1024
     audio = pyaudio.PyAudio()
 
-    info = audio.get_host_api_info_by_index(0)
-    numdevices = info.get('deviceCount')
-    index = int(0)
-    print("recording via index " + str(index))
+    stream = audio.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK)
+    print("Recording started...")
 
-    stream = audio.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, input_device_index=index, frames_per_buffer=CHUNK)
-    print("recording started")
-    Recordframes = []
-
-    # Clear the buffer by reading and discarding any existing data
-    stream.read(stream.get_read_available())
-
+    frames = []
     while recording:
         data = stream.read(CHUNK)
-        Recordframes.append(data)
+        frames.append(data)
+        
+        # Write to a temporary file for real-time transcription
+        wf = wave.open("temp_audio.wav", 'wb')
+        wf.setnchannels(CHANNELS)
+        wf.setsampwidth(audio.get_sample_size(FORMAT))
+        wf.setframerate(RATE)
+        wf.writeframes(b''.join(frames))
+        wf.close()
 
-    print("recording stopped")
-
+    print("Recording stopped.")
     stream.stop_stream()
     stream.close()
     audio.terminate()
 
-    waveFile = wave.open(WAVE_OUTPUT_FILENAME, 'wb')
-    waveFile.setnchannels(CHANNELS)
-    waveFile.setsampwidth(audio.get_sample_size(FORMAT))
-    waveFile.setframerate(RATE)
-    waveFile.writeframes(b''.join(Recordframes))
-    waveFile.close()
+    audio_queue.put("temp_audio.wav")
 
-    # Put the filename in the queue, replacing any existing item
-    if not audio_queue.empty():
-        try:
-            audio_queue.get_nowait()
-        except Empty:
-            pass
-    audio_queue.put(WAVE_OUTPUT_FILENAME)
+def transcribe_audio(audio):
+    model = whisper.load_model("base")  # Change "tiny" to "base" or "small"
+    result = model.transcribe(audio, language="en")
+    return result["text"].lower()
 
-async def speak(voice):
-    global speak_outer
-    message = str(speak_outer)
-    root.after(0, update_speak_label)  # Update the label before speaking
+def continuous_recognition():
+    global recording, listening, result_outer
+    model = whisper.load_model("tiny")
     
-    # Simulate speech synthesis steps
-    steps = [
-        ("Text preprocessing", 10),
-        ("Phoneme generation", 30),
-        ("Audio waveform synthesis", 60)
-    ]
-    
-    progress = 0
-    start_time = time.time()
-    for step, step_progress in steps:
-        for i in range(step_progress):
-            time.sleep(0.01)  # Adjust sleep time based on actual processing time
-            progress += 1
-            root.after(0, lambda p=progress: progress_vars['speech_synthesis'].set(p))
-    
-    end_time = time.time()
-    elapsed_time = end_time - start_time
-    root.after(0, lambda: update_task_time('speech_synthesis', elapsed_time))
-    
-    os.system("say -v \"" + str(voice) + "\" -r 150 \""+ str(message) +"\"")
-    root.after(0, lambda: progress_vars['speech_synthesis'].set(100))
+    while listening:
+        with lock:
+            recording = True
+        Thread(target=record_audio).start()
 
-async def convert_from_wav_to_mp3(filename):
-    os.system(f"ffmpeg -y -v quiet -i {filename} -ar 16000 -ac 1 -c:a pcm_s16le cleanFile.wav")
+        accumulated_text = ""
+        start_time = time.time()
+        
+        while recording:
+            if os.path.exists("temp_audio.wav"):
+                chunk_text = transcribe_audio("temp_audio.wav")
+                if chunk_text != accumulated_text:
+                    new_text = chunk_text[len(accumulated_text):].strip()
+                    accumulated_text = chunk_text
+                    result_outer = accumulated_text
+                    root.after(0, update_result_label)
 
-async def speech_recog(filename):
-    global result_outer
-    start_time = time.time()
-    try:
-        model = whisper.load_model("tiny")
-        audio = whisper.load_audio(filename)
-        audio = whisper.pad_or_trim(audio)
-        mel = whisper.log_mel_spectrogram(audio).to(model.device)
-        
-        # Update progress for model loading and audio preprocessing
-        for i in range(30):
-            time.sleep(0.01)
-            root.after(0, lambda: progress_vars['speech_recog'].set(i))
-        
-        _, probs = model.detect_language(mel)
-        options = whisper.DecodingOptions(fp16=False)
-        
-        # Update progress for language detection
-        for i in range(30, 50):
-            time.sleep(0.01)
-            root.after(0, lambda: progress_vars['speech_recog'].set(i))
-        
-        result = whisper.decode(model, mel, options)
-        
-        # Update progress for decoding
-        for i in range(50, 100):
-            time.sleep(0.01)
-            root.after(0, lambda: progress_vars['speech_recog'].set(i))
-        
-        result_no_dots = re.sub(r'\.', '', result.text)
-        result_no_dots = result_no_dots.lower()
-        print(result_no_dots)
-        result_outer = result_no_dots
-        root.after(0, update_result_label)
-    except Exception as e:
-        print(f"Error during speech recognition: {e}")
-        result_outer = "Error during speech recognition"
-        root.after(0, update_result_label)
-    finally:
+                    print(f"Recognized: {new_text}")  # Debug print
+
+                    if STOP_WORD in new_text:
+                        with lock:
+                            recording = False
+                        break
+
+            time.sleep(0.5)  # Adjust this value to balance between responsiveness and CPU usage
+
         end_time = time.time()
         elapsed_time = end_time - start_time
         root.after(0, lambda: update_task_time('speech_recog', elapsed_time))
         root.after(0, lambda: progress_vars['speech_recog'].set(100))
 
+        if os.path.exists("temp_audio.wav"):
+            os.remove("temp_audio.wav")
+
+        llm_insert()
+
+async def speak(voice):
+    global speak_outer, listening
+    message = str(speak_outer)
+    root.after(0, update_speak_label)
+
+    with lock:
+        listening = False
+    
+    # Set progress bar to 100% before speech synthesis
+    root.after(0, lambda: progress_vars['speech_synthesis'].set(100))
+    
+    # Calculate and update the task time before speech synthesis
+    start_time = time.time()
+    estimated_duration = len(message) * 0.1  # Rough estimate: 0.1 seconds per character
+    root.after(0, lambda: update_task_time('speech_synthesis', estimated_duration))
+    
+    # Play the audio
+    os.system(f"say -v \"{voice}\" -r 150 \"{message}\"")
+    
+    end_time = time.time()
+    actual_duration = end_time - start_time
+    
+    # Update the task time with the actual duration
+    root.after(0, lambda: update_task_time('speech_synthesis', actual_duration))
+
+    # Zero out all stopwatches and progress bars
+    root.after(0, zero_out_ui)
+
+    with lock:
+        listening = True
+    root.after(0, resume_listening)
+
+def zero_out_ui():
+    for var in progress_vars.values():
+        var.set(0)
+    
+    for var in task_times.values():
+        var.set("00:00.00")
+    
+    update_result_label()
+    update_speak_label()
+
 def llm_insert():
-    global result_outer
-    global speak_outer
+    global result_outer, speak_outer
     start_time = time.time()
     try:
         q = result_outer
-        
-        # Simulate LLM processing steps
-        steps = [
-            ("Tokenizing input", 20),
-            ("Processing through layers", 60),
-            ("Generating output", 20)
-        ]
-        
-        progress = 0
-        for step, step_progress in steps:
-            for i in range(step_progress):
-                time.sleep(0.02)  # Adjust sleep time based on actual processing time
-                progress += 1
-                root.after(0, lambda p=progress: progress_vars['llm_inference'].set(p))
-        
         response = ollama.chat(model='tinyllama', messages=[{'role': 'user','content': q,},])
         r1 = response['message']['content']
         speak_outer = r1
@@ -194,22 +178,8 @@ def llm_insert():
         elapsed_time = end_time - start_time
         root.after(0, lambda: update_task_time('llm_inference', elapsed_time))
         root.after(0, lambda: progress_vars['llm_inference'].set(100))
-
-async def process_audio(filename):
-    await convert_from_wav_to_mp3(filename)
-    await speech_recog('cleanFile.wav')
-    llm_insert()
-    await speak("Zoe (Premium)")
-
-def audio_processor():
-    while True:
-        try:
-            filename = audio_queue.get(timeout=1)
-            asyncio.run(process_audio(filename))
-        except Empty:
-            time.sleep(0.1)
-        except Exception as e:
-            print(f"Error in audio processor: {e}")
+    
+    asyncio.run(speak("Zoe (Premium)"))
 
 def update_result_label():
     result_text.config(state=tk.NORMAL)
@@ -223,39 +193,42 @@ def update_speak_label():
     speak_text.insert(tk.END, f"Synthesized: {speak_outer}")
     speak_text.config(state=tk.DISABLED)
 
-def start_recording():
-    global recording, result_outer, speak_outer
-    if not recording:
+def start_listening():
+    global listening, result_outer, speak_outer
+    if not listening:
+        listening = True
         result_outer = ""
         speak_outer = ""
-        recording = True
-        print("recording started")
         
-        # Reset progress bars
         for var in progress_vars.values():
             var.set(0)
         
-        # Reset stopwatch times
         for var in task_times.values():
             var.set("00:00.00")
         
-        # Update the UI labels
         update_result_label()
         update_speak_label()
         
-        Thread(target=record).start()
+        Thread(target=continuous_recognition).start()
 
-def stop_recording():
-    global recording
-    if recording:
+def resume_listening():
+    global listening
+    if listening:
+        Thread(target=continuous_recognition).start()
+
+def stop_listening():
+    global listening, recording
+    with lock:
+        listening = False
         recording = False
-        print("recording stopped")
 
-def on_button_press(event):
-    start_recording()
+def on_start_button_click():
+    start_listening()
+    record_button.config(text="Stop Listening", command=on_stop_button_click)
 
-def on_button_release(event):
-    stop_recording()
+def on_stop_button_click():
+    stop_listening()
+    record_button.config(text="Start Listening", command=on_start_button_click)
 
 def update_task_time(task, elapsed_time):
     minutes, seconds = divmod(int(elapsed_time), 60)
@@ -263,7 +236,7 @@ def update_task_time(task, elapsed_time):
     task_times[task].set(f"{minutes:02d}:{seconds:02d}.{centiseconds:02d}")
 
 # Create and pack UI elements
-record_button = ttk.Button(root, text="Hold to Record")
+record_button = ttk.Button(root, text="Start Listening", command=on_start_button_click)
 record_button.pack(pady=20)
 
 result_text = tk.Text(root, height=5, wrap=tk.WORD)
@@ -290,7 +263,6 @@ for task, var in progress_vars.items():
     percentage_label = ttk.Label(frame, textvariable=var)
     percentage_label.pack(side=tk.LEFT, padx=(5, 0))
     
-    # Add % sign
     ttk.Label(frame, text="%").pack(side=tk.LEFT)
 
 # Add timers at the bottom
@@ -303,11 +275,5 @@ for task, var in task_times.items():
     
     ttk.Label(task_frame, text=f"{task.replace('_', ' ').title()}:").pack()
     ttk.Label(task_frame, textvariable=var, font=("Courier", 12)).pack()
-
-record_button.bind('<ButtonPress-1>', on_button_press)
-record_button.bind('<ButtonRelease-1>', on_button_release)
-
-# Start the audio processor thread
-Thread(target=audio_processor, daemon=True).start()
 
 root.mainloop()
