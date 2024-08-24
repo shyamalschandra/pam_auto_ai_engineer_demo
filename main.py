@@ -14,6 +14,8 @@ from queue import Queue, Empty
 import time
 import numpy as np
 import warnings
+import subprocess
+
 warnings.filterwarnings("ignore", category=UserWarning, module="whisper.transcribe")
 
 result_outer = ""
@@ -43,6 +45,30 @@ task_times = {
     'speech_synthesis': tk.StringVar(root, value="00:00.00")
 }
 
+# Add these global variables
+input_devices = []
+output_voices = []
+selected_input_device = tk.StringVar()
+selected_output_voice = tk.StringVar()
+
+# Add these functions to get input devices and output voices
+def get_input_devices():
+    global input_devices
+    p = pyaudio.PyAudio()
+    input_devices = []
+    for i in range(p.get_device_count()):
+        dev = p.get_device_info_by_index(i)
+        if dev.get('maxInputChannels') > 0:
+            input_devices.append(dev['name'])
+    p.terminate()
+    return input_devices
+
+def get_output_voices():
+    global output_voices
+    result = subprocess.run(['say', '-v', '?'], capture_output=True, text=True)
+    output_voices = [line.split()[0] for line in result.stdout.split('\n') if line]
+    return output_voices
+
 def record_audio():
     global recording
     FORMAT = pyaudio.paInt16
@@ -51,7 +77,16 @@ def record_audio():
     CHUNK = 1024
     audio = pyaudio.PyAudio()
 
-    stream = audio.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK)
+    # Get the index of the selected input device
+    device_index = None
+    for i in range(audio.get_device_count()):
+        dev = audio.get_device_info_by_index(i)
+        if dev['name'] == selected_input_device.get():
+            device_index = i
+            break
+
+    stream = audio.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, 
+                        frames_per_buffer=CHUNK, input_device_index=device_index)
     print("Recording started...")
 
     frames = []
@@ -135,8 +170,8 @@ async def speak(voice):
     estimated_duration = len(message) * 0.1  # Rough estimate: 0.1 seconds per character
     root.after(0, lambda: update_task_time('speech_synthesis', estimated_duration))
     
-    # Play the audio
-    os.system(f"say -v \"{voice}\" -r 150 \"{message}\"")
+    # Play the audio with the selected voice
+    os.system(f"say -v \"{selected_output_voice.get()}\" -r 150 \"{message}\"")
     
     end_time = time.time()
     actual_duration = end_time - start_time
@@ -235,45 +270,73 @@ def update_task_time(task, elapsed_time):
     centiseconds = int((elapsed_time - int(elapsed_time)) * 100)
     task_times[task].set(f"{minutes:02d}:{seconds:02d}.{centiseconds:02d}")
 
-# Create and pack UI elements
-record_button = ttk.Button(root, text="Start Listening", command=on_start_button_click)
-record_button.pack(pady=20)
-
-result_text = tk.Text(root, height=5, wrap=tk.WORD)
-result_text.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
-result_text.insert(tk.END, "Recognized: ")
-result_text.config(state=tk.DISABLED)
-
-speak_text = tk.Text(root, height=5, wrap=tk.WORD)
-speak_text.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
-speak_text.insert(tk.END, "Synthesized: ")
-speak_text.config(state=tk.DISABLED)
-
-# Add progress bars with labels
-for task, var in progress_vars.items():
+# Add these functions to create the input and output selection widgets
+def create_input_selection():
     frame = ttk.Frame(root)
     frame.pack(fill=tk.X, padx=10, pady=5)
     
-    label = ttk.Label(frame, text=f"{task.replace('_', ' ').title()}:")
-    label.pack(side=tk.LEFT)
-    
-    progress_bar = ttk.Progressbar(frame, variable=var, maximum=100, length=200, mode='determinate')
-    progress_bar.pack(side=tk.LEFT, padx=(5, 0))
-    
-    percentage_label = ttk.Label(frame, textvariable=var)
-    percentage_label.pack(side=tk.LEFT, padx=(5, 0))
-    
-    ttk.Label(frame, text="%").pack(side=tk.LEFT)
+    ttk.Label(frame, text="Input Device:").pack(side=tk.LEFT)
+    input_combo = ttk.Combobox(frame, textvariable=selected_input_device, values=get_input_devices())
+    input_combo.pack(side=tk.LEFT, padx=(5, 0))
+    input_combo.set(input_devices[0] if input_devices else "")
 
-# Add timers at the bottom
-timer_frame = ttk.Frame(root)
-timer_frame.pack(fill=tk.X, padx=10, pady=10)
-
-for task, var in task_times.items():
-    task_frame = ttk.Frame(timer_frame)
-    task_frame.pack(side=tk.LEFT, expand=True)
+def create_output_selection():
+    frame = ttk.Frame(root)
+    frame.pack(fill=tk.X, padx=10, pady=5)
     
-    ttk.Label(task_frame, text=f"{task.replace('_', ' ').title()}:").pack()
-    ttk.Label(task_frame, textvariable=var, font=("Courier", 12)).pack()
+    ttk.Label(frame, text="Output Voice:").pack(side=tk.LEFT)
+    output_combo = ttk.Combobox(frame, textvariable=selected_output_voice, values=get_output_voices())
+    output_combo.pack(side=tk.LEFT, padx=(5, 0))
+    output_combo.set(output_voices[0] if output_voices else "")
+
+# Modify your main UI creation to include the new widgets
+def create_ui():
+    global record_button, result_text, speak_text
+
+    create_input_selection()
+    create_output_selection()
+
+    record_button = ttk.Button(root, text="Start Listening", command=on_start_button_click)
+    record_button.pack(pady=20)
+
+    result_text = tk.Text(root, height=5, wrap=tk.WORD)
+    result_text.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
+    result_text.insert(tk.END, "Recognized: ")
+    result_text.config(state=tk.DISABLED)
+
+    speak_text = tk.Text(root, height=5, wrap=tk.WORD)
+    speak_text.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
+    speak_text.insert(tk.END, "Synthesized: ")
+    speak_text.config(state=tk.DISABLED)
+
+    # Add progress bars with labels
+    for task, var in progress_vars.items():
+        frame = ttk.Frame(root)
+        frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        label = ttk.Label(frame, text=f"{task.replace('_', ' ').title()}:")
+        label.pack(side=tk.LEFT)
+        
+        progress_bar = ttk.Progressbar(frame, variable=var, maximum=100, length=200, mode='determinate')
+        progress_bar.pack(side=tk.LEFT, padx=(5, 0))
+        
+        percentage_label = ttk.Label(frame, textvariable=var)
+        percentage_label.pack(side=tk.LEFT, padx=(5, 0))
+        
+        ttk.Label(frame, text="%").pack(side=tk.LEFT)
+
+    # Add timers at the bottom
+    timer_frame = ttk.Frame(root)
+    timer_frame.pack(fill=tk.X, padx=10, pady=10)
+
+    for task, var in task_times.items():
+        task_frame = ttk.Frame(timer_frame)
+        task_frame.pack(side=tk.LEFT, expand=True)
+        
+        ttk.Label(task_frame, text=f"{task.replace('_', ' ').title()}:").pack()
+        ttk.Label(task_frame, textvariable=var, font=("Courier", 12)).pack()
+
+# Call create_ui() instead of creating UI elements directly
+create_ui()
 
 root.mainloop()
