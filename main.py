@@ -16,12 +16,29 @@ from threading import Thread
 from queue import Queue, Empty
 import time
 
-from TTS.api import TTS
-
 result_outer = ""
 speak_outer = ""
 recording = False
 audio_queue = Queue(maxsize=1)  # Queue to hold the most recent audio file
+
+# Create the root window first
+root = tk.Tk()
+root.title("Voice Recorder")
+root.geometry("400x600")  # Increased height to accommodate timers
+root.resizable(True, True)
+
+# Now create the Tkinter variables
+progress_vars = {
+    'speech_recog': tk.DoubleVar(root),
+    'llm_inference': tk.DoubleVar(root),
+    'speech_synthesis': tk.DoubleVar(root)
+}
+
+task_times = {
+    'speech_recog': tk.StringVar(root, value="00:00.00"),
+    'llm_inference': tk.StringVar(root, value="00:00.00"),
+    'speech_synthesis': tk.StringVar(root, value="00:00.00")
+}
 
 def record():
     global recording
@@ -74,21 +91,61 @@ async def speak(voice):
     global speak_outer
     message = str(speak_outer)
     root.after(0, update_speak_label)  # Update the label before speaking
+    
+    # Simulate speech synthesis steps
+    steps = [
+        ("Text preprocessing", 10),
+        ("Phoneme generation", 30),
+        ("Audio waveform synthesis", 60)
+    ]
+    
+    progress = 0
+    start_time = time.time()
+    for step, step_progress in steps:
+        for i in range(step_progress):
+            time.sleep(0.01)  # Adjust sleep time based on actual processing time
+            progress += 1
+            root.after(0, lambda p=progress: progress_vars['speech_synthesis'].set(p))
+    
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    root.after(0, lambda: update_task_time('speech_synthesis', elapsed_time))
+    
     os.system("say -v \"" + str(voice) + "\" -r 150 \""+ str(message) +"\"")
+    root.after(0, lambda: progress_vars['speech_synthesis'].set(100))
 
 async def convert_from_wav_to_mp3(filename):
     os.system(f"ffmpeg -y -v quiet -i {filename} -ar 16000 -ac 1 -c:a pcm_s16le cleanFile.wav")
 
 async def speech_recog(filename):
     global result_outer
+    start_time = time.time()
     try:
         model = whisper.load_model("tiny")
         audio = whisper.load_audio(filename)
         audio = whisper.pad_or_trim(audio)
         mel = whisper.log_mel_spectrogram(audio).to(model.device)
+        
+        # Update progress for model loading and audio preprocessing
+        for i in range(30):
+            time.sleep(0.01)
+            root.after(0, lambda: progress_vars['speech_recog'].set(i))
+        
         _, probs = model.detect_language(mel)
         options = whisper.DecodingOptions(fp16=False)
+        
+        # Update progress for language detection
+        for i in range(30, 50):
+            time.sleep(0.01)
+            root.after(0, lambda: progress_vars['speech_recog'].set(i))
+        
         result = whisper.decode(model, mel, options)
+        
+        # Update progress for decoding
+        for i in range(50, 100):
+            time.sleep(0.01)
+            root.after(0, lambda: progress_vars['speech_recog'].set(i))
+        
         result_no_dots = re.sub(r'\.', '', result.text)
         result_no_dots = result_no_dots.lower()
         print(result_no_dots)
@@ -98,13 +155,33 @@ async def speech_recog(filename):
         print(f"Error during speech recognition: {e}")
         result_outer = "Error during speech recognition"
         root.after(0, update_result_label)
+    finally:
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        root.after(0, lambda: update_task_time('speech_recog', elapsed_time))
+        root.after(0, lambda: progress_vars['speech_recog'].set(100))
 
 def llm_insert():
     global result_outer
     global speak_outer
+    start_time = time.time()
     try:
         q = result_outer
-        #response = ollama.chat(model='openhermes2.5-mistral', messages=[{'role': 'user','content': q,},])
+        
+        # Simulate LLM processing steps
+        steps = [
+            ("Tokenizing input", 20),
+            ("Processing through layers", 60),
+            ("Generating output", 20)
+        ]
+        
+        progress = 0
+        for step, step_progress in steps:
+            for i in range(step_progress):
+                time.sleep(0.02)  # Adjust sleep time based on actual processing time
+                progress += 1
+                root.after(0, lambda p=progress: progress_vars['llm_inference'].set(p))
+        
         response = ollama.chat(model='tinyllama', messages=[{'role': 'user','content': q,},])
         r1 = response['message']['content']
         speak_outer = r1
@@ -112,6 +189,11 @@ def llm_insert():
     except Exception as e:
         print(f"Error during LLM insertion: {e}")
         speak_outer = "Error during LLM insertion"
+    finally:
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        root.after(0, lambda: update_task_time('llm_inference', elapsed_time))
+        root.after(0, lambda: progress_vars['llm_inference'].set(100))
 
 async def process_audio(filename):
     await convert_from_wav_to_mp3(filename)
@@ -148,6 +230,19 @@ def start_recording():
         speak_outer = ""
         recording = True
         print("recording started")
+        
+        # Reset progress bars
+        for var in progress_vars.values():
+            var.set(0)
+        
+        # Reset stopwatch times
+        for var in task_times.values():
+            var.set("00:00.00")
+        
+        # Update the UI labels
+        update_result_label()
+        update_speak_label()
+        
         Thread(target=record).start()
 
 def stop_recording():
@@ -162,11 +257,12 @@ def on_button_press(event):
 def on_button_release(event):
     stop_recording()
 
-root = tk.Tk()
-root.title("Voice Recorder")
-root.geometry("400x300")
-root.resizable(True, True)
+def update_task_time(task, elapsed_time):
+    minutes, seconds = divmod(int(elapsed_time), 60)
+    centiseconds = int((elapsed_time - int(elapsed_time)) * 100)
+    task_times[task].set(f"{minutes:02d}:{seconds:02d}.{centiseconds:02d}")
 
+# Create and pack UI elements
 record_button = ttk.Button(root, text="Hold to Record")
 record_button.pack(pady=20)
 
@@ -179,6 +275,34 @@ speak_text = tk.Text(root, height=5, wrap=tk.WORD)
 speak_text.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
 speak_text.insert(tk.END, "Synthesized: ")
 speak_text.config(state=tk.DISABLED)
+
+# Add progress bars with labels
+for task, var in progress_vars.items():
+    frame = ttk.Frame(root)
+    frame.pack(fill=tk.X, padx=10, pady=5)
+    
+    label = ttk.Label(frame, text=f"{task.replace('_', ' ').title()}:")
+    label.pack(side=tk.LEFT)
+    
+    progress_bar = ttk.Progressbar(frame, variable=var, maximum=100, length=200, mode='determinate')
+    progress_bar.pack(side=tk.LEFT, padx=(5, 0))
+    
+    percentage_label = ttk.Label(frame, textvariable=var)
+    percentage_label.pack(side=tk.LEFT, padx=(5, 0))
+    
+    # Add % sign
+    ttk.Label(frame, text="%").pack(side=tk.LEFT)
+
+# Add timers at the bottom
+timer_frame = ttk.Frame(root)
+timer_frame.pack(fill=tk.X, padx=10, pady=10)
+
+for task, var in task_times.items():
+    task_frame = ttk.Frame(timer_frame)
+    task_frame.pack(side=tk.LEFT, expand=True)
+    
+    ttk.Label(task_frame, text=f"{task.replace('_', ' ').title()}:").pack()
+    ttk.Label(task_frame, textvariable=var, font=("Courier", 12)).pack()
 
 record_button.bind('<ButtonPress-1>', on_button_press)
 record_button.bind('<ButtonRelease-1>', on_button_release)
