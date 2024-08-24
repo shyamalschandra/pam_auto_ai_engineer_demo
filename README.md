@@ -1,4 +1,4 @@
-# pam_auto_ai_engineer_demo
+# Pam Auto AI Engineering Demo - Hackathon (August 23-25, 2024) - Shyamal Chandra, Chief Sole Engineer
 pam_auto_ai_engineer_demo for August 23, 2024 Hackathon for Headstarters.AI
 
 all Python code is copyrighted property of Shyamal Chandra (C) 2024
