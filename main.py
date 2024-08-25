@@ -26,6 +26,7 @@ listening = False
 audio_queue = Queue(maxsize=1)
 STOP_WORD = "roger"  # Change this to your preferred stop word
 lock = Lock()
+speak_lock = Lock()
 
 # Create the root window first
 root = tk.Tk()
@@ -154,13 +155,36 @@ def continuous_recognition():
         if os.path.exists("temp_audio.wav"):
             os.remove("temp_audio.wav")
 
-        llm_insert()
+        asyncio.run(llm_insert())
         
     root.after(0, lambda: update_listening_indicator(False))
 
+async def llm_insert():
+    global result_outer, speak_outer
+    start_time = time.time()
+    try:
+        q = result_outer
+        response = ollama.chat(model='tinyllama', messages=[{'role': 'user','content': q,},])
+        r1 = response['message']['content']
+        with speak_lock:
+            speak_outer = r1
+        print("Prompt reply: " + r1 + "")
+    except Exception as e:
+        print(f"Error during LLM insertion: {e}")
+        with speak_lock:
+            speak_outer = "Error during LLM insertion"
+    finally:
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        root.after(0, lambda: update_task_time('llm_inference', elapsed_time))
+        root.after(0, lambda: progress_vars['llm_inference'].set(100))
+    
+    await speak(selected_output_voice.get())
+
 async def speak(voice):
     global speak_outer, listening
-    message = str(speak_outer)
+    with speak_lock:
+        message = str(speak_outer)
     root.after(0, update_speak_label)
 
     with lock:
@@ -176,7 +200,7 @@ async def speak(voice):
     root.after(0, lambda: update_task_time('speech_synthesis', estimated_duration))
     
     # Play the audio with the selected voice
-    os.system(f"say -v \"{selected_output_voice.get()}\" -r 150 \"{message}\"")
+    os.system(f"say -v \"{voice}\" -r 150 \"{message}\"")
     
     end_time = time.time()
     actual_duration = end_time - start_time
@@ -229,9 +253,11 @@ def update_result_label():
     result_text.config(state=tk.DISABLED)
 
 def update_speak_label():
+    with speak_lock:
+        message = speak_outer
     speak_text.config(state=tk.NORMAL)
     speak_text.delete(1.0, tk.END)
-    speak_text.insert(tk.END, f"Synthesized: {speak_outer}")
+    speak_text.insert(tk.END, f"Synthesized: {message}")
     speak_text.config(state=tk.DISABLED)
 
 def start_listening():
